@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Web Video Redactor (CDN-only)</title>
+<title>Web Video Redactor (CDN auto-fallback)</title>
 <style>
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f1115;color:#eaeaea;margin:0}
   .wrap{max-width:960px;margin:0 auto;padding:12px}
@@ -70,28 +70,99 @@
   </div>
 </div>
 
-<!-- Load UMD wrapper from CDN: defines window.FFmpeg (classic script avoids module CORS) -->
-<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<!-- A) Robust loader: try several CDNs/versions for the UMD wrapper -->
+<script>
+  const diagEl = document.getElementById('diag');
+  const logd = (m) => { diagEl.textContent += (diagEl.textContent? "\n":"") + m; console.log(m); };
 
+  // Candidate wrapper URLs (UMD exposes window.FFmpeg). Order matters.
+  const WRAPPER_CANDIDATES = [
+    // jsDelivr (latest 0.12)
+    "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12/dist/umd/ffmpeg.js",
+    // jsDelivr pinned
+    "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js",
+    // unpkg (latest 0.12)
+    "https://unpkg.com/@ffmpeg/ffmpeg@0.12/dist/umd/ffmpeg.js",
+    // unpkg pinned
+    "https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"
+  ];
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src + (src.includes('?') ? '&' : '?') + 'v=' + Date.now(); // cache-bust
+      s.crossOrigin = "anonymous";
+      s.referrerPolicy = "no-referrer";
+      s.onload = () => resolve(src);
+      s.onerror = () => reject(new Error('load failed: ' + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureWrapper() {
+    for (const url of WRAPPER_CANDIDATES) {
+      try {
+        logd('Trying wrapper: ' + url);
+        await loadScript(url);
+        if (window.FFmpeg) {
+          logd('✅ Loaded wrapper: ' + url);
+          return url;
+        } else {
+          logd('Wrapper loaded but window.FFmpeg is missing (unexpected): ' + url);
+        }
+      } catch (e) {
+        logd('❌ ' + e.message);
+      }
+    }
+    throw new Error('No wrapper could be loaded from any CDN.');
+  }
+
+  // Build a matching core URL (single-thread UMD) on the SAME CDN base
+  function coreFromWrapper(wrapperUrl) {
+    // swap package name and path
+    // e.g. https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js
+    //  -> https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.js
+    const vMatch = wrapperUrl.match(/@ffmpeg\/ffmpeg@([^/]+)/);
+    const ver = vMatch ? vMatch[1] : "0.12";
+    const base = wrapperUrl.split('@ffmpeg/ffmpeg@')[0]; // keep CDN host/prefix
+    const coreUrl = `${base}@ffmpeg/core@${ver}/dist/umd/ffmpeg-core.js`;
+    logd('Core candidate: ' + coreUrl);
+    return coreUrl;
+  }
+
+  // Expose a promise for the app module to await
+  window.__loadFFmpeg = (async () => {
+    const wrapperUrl = await ensureWrapper();
+    const coreUrl = coreFromWrapper(wrapperUrl);
+    return { wrapperUrl, coreUrl };
+  })();
+</script>
+
+<!-- B) App logic -->
 <script type="module">
   const diag = document.getElementById('diag');
   const logd = (m)=>{ diag.textContent += (diag.textContent? "\n":"") + m; console.log(m); };
 
-  // Wait one tick to ensure the UMD script executed and window.FFmpeg exists
-  if (!window.FFmpeg) { await new Promise(r=>requestAnimationFrame(r)); }
-  if (!window.FFmpeg) {
-    logd('FFmpeg wrapper not loaded. Check the CDN URL above.');
-    alert('ffmpeg wrapper not loaded.');
-    throw new Error('FFmpeg wrapper missing');
+  // Wait for the wrapper + derived core URL
+  let wrapperUrl, coreUrl;
+  try {
+    ({ wrapperUrl, coreUrl } = await window.__loadFFmpeg);
+  } catch (e) {
+    alert("FFmpeg wrapper not loaded. See diagnostics below.");
+    throw e;
   }
 
-  // Use the SINGLE-THREAD core hosted on the SAME CDN (UMD path)
-  const CORE_JS = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.js";
+  if (!window.FFmpeg) {
+    alert("window.FFmpeg missing after wrapper load.");
+    throw new Error("FFmpeg wrapper missing");
+  }
 
   const { createFFmpeg, fetchFile } = window.FFmpeg;
-  const ffmpeg = createFFmpeg({ log: true, corePath: CORE_JS });
 
-  // --- app code (same as before) ---
+  // Create ffmpeg instance with the corePath we derived from the wrapper URL
+  const ffmpeg = createFFmpeg({ log: true, corePath: coreUrl });
+
+  // ---- your app (unchanged below) ----
   const $ = (id)=>document.getElementById(id);
   const fileEl=$("file"), loadBtn=$("loadBtn"), vid=$("vid");
   const overlay=$("overlay"); const ctx=overlay.getContext("2d");
@@ -124,19 +195,20 @@
   $("addBlackout").onclick=()=>{ if(startMark==null||endMark==null||!selection) return alert("Set start/end and draw an area first."); blackouts.push({start:startMark,end:endMark,rect:selection}); renderLists(); };
   $("addMute").onclick=()=>{ if(startMark==null||endMark==null) return alert("Set start/end first."); mutes.push({start:startMark,end:endMark}); renderLists(); };
 
-  loadBtn.onclick=async()=>{
-    const f=fileEl.files&&fileEl.files[0];
+  $("loadBtn").onclick=async()=>{
+    const f=$("file").files&&$("file").files[0];
     if(!f) return alert("Choose a video file.");
     await ensureFFmpeg();
-    inputName=`input_${Date.now()}.`+(f.name.split(".").pop()||"mp4");
-    ffmpeg.FS("writeFile", inputName, await fetchFile(f));
+    const ext=(f.name.split(".").pop()||"mp4");
+    window.inputName=`input_${Date.now()}.`+ext;
+    ffmpeg.FS("writeFile", window.inputName, await fetchFile(f));
     vid.src=URL.createObjectURL(f); vid.load();
     meta.textContent=`Loaded: ${f.name}`;
   };
 
   function buildFilters(){
-    const vparts=blackouts.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`);
-    const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`);
+    const vparts=window.blackouts?.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`)||[];
+    const aparts=window.mutes?.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`)||[];
     const v=vparts.length?vparts.join(","):"null";
     const a=aparts.length?aparts.join(","):"anull";
     return { filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`, maps:["-map","[vout]","-map","[aout]"] };
@@ -147,10 +219,10 @@
     if(!vid.src) return alert("Load a video first");
     const { filterComplex, maps } = buildFilters();
     prog.value=0; progLbl.textContent="Encoding MP4…";
-    await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4");
-    const mp4Data=ffmpeg.FS("readFile","out.mp4");
-    const mp4Url=URL.createObjectURL(new Blob([mp4Data.buffer],{type:"video/mp4"}));
-    outLinks.innerHTML = `<a class="btn" href="${mp4Url}" download="redacted.mp4">Download MP4</a>`;
+    await ffmpeg.run("-i",window.inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4");
+    const mp4 = ffmpeg.FS("readFile","out.mp4");
+    const url = URL.createObjectURL(new Blob([mp4.buffer],{type:"video/mp4"}));
+    outLinks.innerHTML = `<a class="btn" href="${url}" download="redacted.mp4">Download MP4</a>`;
     prog.value=1; progLbl.textContent="Done!";
   };
 </script>
