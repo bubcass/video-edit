@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Web Video Redactor (local core)</title>
+<title>Web Video Redactor (local ffmpeg)</title>
 <style>
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f1115;color:#eaeaea;margin:0}
   .wrap{max-width:960px;margin:0 auto;padding:12px}
@@ -19,6 +19,7 @@
   li{background:#161b22;border:1px solid #202533;border-radius:8px;padding:6px 8px;margin:4px 0;font-size:13px}
   progress{width:100%;height:12px}
   small.mono{font-family:ui-monospace,Menlo,Consolas,monospace;color:#9db}
+  #diag{white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;color:#9db;margin-top:8px}
 </style>
 </head>
 <body>
@@ -64,16 +65,26 @@
     <div style="margin-top:10px">
       <progress id="prog" value="0" max="1"></progress>
       <div id="progLbl" class="mono">Idle</div>
+      <div id="diag"></div>
     </div>
     <div id="outLinks" style="margin-top:8px"></div>
   </div>
 </div>
 
-<!-- ✅ Local-core setup -->
-<script type="module">
-  import { createFFmpeg, fetchFile } from "https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js";
+<!-- 1) Load local UMD wrapper (no CORS). It exposes window.FFmpeg -->
+<script src="./ffmpeg.min.js"></script>
 
-  // 🧩 FFmpeg core files are served from your own repo root
+<!-- 2) Your app code (module is fine; we read from window.FFmpeg) -->
+<script type="module">
+  const diag = document.getElementById("diag");
+  const logd = (m)=>{ diag.textContent += (diag.textContent? "\n":"") + m; console.log(m); };
+
+  if (!window.FFmpeg) {
+    logd("ffmpeg.min.js not found. Make sure ffmpeg.min.js is next to index.html.");
+  }
+  const { createFFmpeg, fetchFile } = window.FFmpeg;
+
+  // Point to local core files
   const ffmpeg = createFFmpeg({
     log: true,
     corePath: "./ffmpeg-core.js"
@@ -98,7 +109,7 @@
   async function ensureFFmpeg(){
     if(!ffmpegLoaded){
       progLbl.textContent="Loading FFmpeg core…";
-      await ffmpeg.load();
+      await ffmpeg.load();  // loads ./ffmpeg-core.js (+ .wasm + .worker.js)
       ffmpegLoaded=true;
       progLbl.textContent="Ready";
     }
@@ -107,17 +118,16 @@
   function fmt(s){if(!isFinite(s))return"--:--";s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`;}
   function fitCanvas(){const r=vid.getBoundingClientRect();overlay.width=r.width;overlay.height=r.height;drawOverlay();}
   function videoRect(){const vw=vid.videoWidth,vh=vid.videoHeight;const cw=overlay.width,ch=overlay.height;if(!vw||!vh)return{x:0,y:0,w:cw,h:ch,scaleX:1,scaleY:1};const scale=Math.min(cw/vw,ch/vh);const dw=Math.round(vw*scale),dh=Math.round(vh*scale);const offx=Math.floor((cw-dw)/2),offy=Math.floor((ch-dh)/2);return{x:offx,y:offy,w:dw,h:dh,scaleX:vw/dw,scaleY:vh/dh};}
-  function canvasToVideo(pt){const r=videoRect();return{x:Math.round((pt.x-r.x)*r.scaleX),y:Math.round((pt.y-r.y)*r.scaleY)};}
+  function canvasToVideo(pt){const r=videoRect();const cx=Math.max(r.x,Math.min(pt.x,r.x+r.w));const cy=Math.max(r.y,Math.min(pt.y,r.y+r.h));return{x:Math.round((cx-r.x)*r.scaleX),y:Math.round((cy-r.y)*r.scaleY)};}
   function videoToCanvasRect(rect){const r=videoRect();return{x:Math.round(r.x+rect.x/r.scaleX),y:Math.round(r.y+rect.y/r.scaleY),w:Math.round(rect.w/r.scaleX),h:Math.round(rect.h/r.scaleY)};}
   function drawOverlay(){ctx.clearRect(0,0,overlay.width,overlay.height);if(selection){const r=videoToCanvasRect(selection);ctx.strokeStyle="#00E5FF";ctx.lineWidth=2;ctx.setLineDash([6,3]);ctx.strokeRect(r.x,r.y,r.w,r.h);ctx.setLineDash([]);}}
   window.addEventListener("resize",fitCanvas);
   vid.addEventListener("loadedmetadata",fitCanvas);
   vid.addEventListener("timeupdate",()=>timeLbl.textContent=`${fmt(vid.currentTime)} / ${fmt(vid.duration)}`);
 
-  overlay.addEventListener("mousedown",e=>{if(!vid.videoWidth)return;const bb=overlay.getBoundingClientRect();const v0=canvasToVideo({x:e.clientX-bb.left,y:e.clientY-bb.top});dragging=true;dragStart=v0;selection={x:v0.x,y:v0.y,w:1,h:1};drawOverlay();});
-  window.addEventListener("mousemove",e=>{if(!dragging)return;const bb=overlay.getBoundingClientRect();const v1=canvasToVideo({x:e.clientX-bb.left,y:e.clientY-bb.top});selection={x:Math.min(dragStart.x,v1.x),y:Math.min(dragStart.y,v1.y),w:Math.abs(v1.x-dragStart.x),h:Math.abs(v1.y-dragStart.y)};drawOverlay();});
+  overlay.addEventListener("mousedown",e=>{if(!vid.videoWidth){alert("Load a video first.");return;}const bb=overlay.getBoundingClientRect();const sx=e.clientX-bb.left,sy=e.clientY-bb.top;const v0=canvasToVideo({x:sx,y:sy});dragging=true;dragStart=v0;selection={x:v0.x,y:v0.y,w:1,h:1};drawOverlay();});
+  window.addEventListener("mousemove",e=>{if(!dragging)return;const bb=overlay.getBoundingClientRect();const cx=Math.max(0,Math.min(e.clientX-bb.left,overlay.width));const cy=Math.max(0,Math.min(e.clientY-bb.top,overlay.height));const v1=canvasToVideo({x:cx,y:cy});selection={x:Math.min(dragStart.x,v1.x),y:Math.min(dragStart.y,v1.y),w:Math.abs(v1.x-dragStart.x),h:Math.abs(v1.y-dragStart.y)};drawOverlay();});
   window.addEventListener("mouseup",()=>dragging=false);
-
   document.getElementById("clearSel").onclick=()=>{selection=null;drawOverlay();};
   document.getElementById("play").onclick=()=>vid.play();
   document.getElementById("pause").onclick=()=>vid.pause();
@@ -125,12 +135,11 @@
   document.getElementById("endNow").onclick=()=>{endMark=vid.currentTime;alert(`End = ${endMark.toFixed(2)}s`);};
 
   function renderLists(){
-    blkList.innerHTML=blackouts.map((b,i)=>`<li>#${i+1} ${b.start.toFixed(1)}–${b.end.toFixed(1)}s</li>`).join("");
+    blkList.innerHTML=blackouts.map((b,i)=>`<li>#${i+1} ${b.start.toFixed(1)}–${b.end.toFixed(1)}s | x=${b.rect.x} y=${b.rect.y} w=${b.rect.w} h=${b.rect.h}</li>`).join("");
     muteList.innerHTML=mutes.map((m,i)=>`<li>#${i+1} ${m.start.toFixed(1)}–${m.end.toFixed(1)}s</li>`).join("");
   }
-
-  document.getElementById("addBlackout").onclick=()=>{if(startMark==null||endMark==null||!selection)return;blackouts.push({start:startMark,end:endMark,rect:selection});renderLists();};
-  document.getElementById("addMute").onclick=()=>{if(startMark==null||endMark==null)return;mutes.push({start:startMark,end:endMark});renderLists();};
+  document.getElementById("addBlackout").onclick=()=>{if(startMark==null||endMark==null||!selection)return alert("Set start/end and draw a box");blackouts.push({start:startMark,end:endMark,rect:selection});renderLists();};
+  document.getElementById("addMute").onclick=()=>{if(startMark==null||endMark==null)return alert("Set start/end");mutes.push({start:startMark,end:endMark});renderLists();};
 
   loadBtn.onclick=async()=>{
     const f=fileEl.files&&fileEl.files[0];
@@ -138,15 +147,16 @@
     await ensureFFmpeg();
     inputName="input_"+Date.now()+"."+(f.name.split(".").pop()||"mp4");
     ffmpeg.FS("writeFile",inputName,await fetchFile(f));
-    const url=URL.createObjectURL(f);
-    vid.src=url; vid.load();
+    vid.src=URL.createObjectURL(f); vid.load();
     meta.textContent=`Loaded: ${f.name}`;
   };
 
   function buildFilters(){
     const vparts=blackouts.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`);
     const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`);
-    return {filterComplex:`[0:v]${vparts.join(",")}[vout];[0:a]${aparts.join(",")}[aout]`,maps:["-map","[vout]","-map","[aout]"]};
+    const v = vparts.length ? vparts.join(",") : "null";
+    const a = aparts.length ? aparts.join(",") : "anull";
+    return { filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`, maps:["-map","[vout]","-map","[aout]"] };
   }
 
   document.getElementById("startExport").onclick=async()=>{
@@ -157,10 +167,16 @@
     await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4");
     const mp4Data=ffmpeg.FS("readFile","out.mp4");
     const mp4Blob=new Blob([mp4Data.buffer],{type:"video/mp4"});
-    const mp4Url=URL.createObjectURL(mp4Blob);
-    outLinks.innerHTML=`<a class='btn' href='${mp4Url}' download='redacted.mp4'>Download MP4</a>`;
+    outLinks.innerHTML=`<a class='btn' href='${URL.createObjectURL(mp4Blob)}' download='redacted.mp4'>Download MP4</a>`;
     prog.value=1;progLbl.textContent="Done!";
   };
+
+  // Show any script loading issues
+  window.addEventListener("error",(e)=>{
+    if(e.target && e.target.tagName==="SCRIPT"){
+      logd("Script load failed: "+(e.target.src||"(inline)"));
+    }
+  }, true);
 </script>
 </body>
 </html>
