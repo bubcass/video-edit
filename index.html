@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Web Video Redactor (local ffmpeg via Actions)</title>
+<title>Web Video Redactor (CDN-only)</title>
 <style>
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f1115;color:#eaeaea;margin:0}
   .wrap{max-width:960px;margin:0 auto;padding:12px}
+  h1{font-size:18px;margin:6px 0 10px;color:#cde}
   .panel{background:#131721;border:1px solid #202533;border-radius:12px;padding:12px;margin:10px 0}
   .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   .btn{background:#2d6cdf;color:#fff;border:0;border-radius:8px;padding:8px 12px;font-weight:600;cursor:pointer}
@@ -69,20 +70,34 @@
   </div>
 </div>
 
-<!-- Local wrapper, populated by GitHub Actions into the published site -->
-<script src="./ffmpeg.min.js"></script>
+<!-- Load UMD wrapper from CDN: defines window.FFmpeg (classic script avoids module CORS) -->
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
 <script type="module">
-  const { createFFmpeg, fetchFile } = window.FFmpeg;
-  const CORE_URL = new URL('./ffmpeg-core.js', location.href).toString();
-  const ffmpeg = createFFmpeg({ log: true, corePath: CORE_URL });
+  const diag = document.getElementById('diag');
+  const logd = (m)=>{ diag.textContent += (diag.textContent? "\n":"") + m; console.log(m); };
 
-  const byId = (id)=>document.getElementById(id);
-  const fileEl=byId("file"), loadBtn=byId("loadBtn"), vid=byId("vid");
-  const overlay=byId("overlay"); const ctx=overlay.getContext("2d");
-  const prog=byId("prog"), progLbl=byId("progLbl"), outLinks=byId("outLinks");
-  const blkList=byId("blkList"), muteList=byId("muteList");
-  const timeLbl=byId("timeLbl"), meta=byId("meta"), diag=byId("diag");
+  // Wait one tick to ensure the UMD script executed and window.FFmpeg exists
+  if (!window.FFmpeg) { await new Promise(r=>requestAnimationFrame(r)); }
+  if (!window.FFmpeg) {
+    logd('FFmpeg wrapper not loaded. Check the CDN URL above.');
+    alert('ffmpeg wrapper not loaded.');
+    throw new Error('FFmpeg wrapper missing');
+  }
+
+  // Use the SINGLE-THREAD core hosted on the SAME CDN (UMD path)
+  const CORE_JS = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.js";
+
+  const { createFFmpeg, fetchFile } = window.FFmpeg;
+  const ffmpeg = createFFmpeg({ log: true, corePath: CORE_JS });
+
+  // --- app code (same as before) ---
+  const $ = (id)=>document.getElementById(id);
+  const fileEl=$("file"), loadBtn=$("loadBtn"), vid=$("vid");
+  const overlay=$("overlay"); const ctx=overlay.getContext("2d");
+  const prog=$("prog"), progLbl=$("progLbl"), outLinks=$("outLinks");
+  const blkList=$("blkList"), muteList=$("muteList");
+  const timeLbl=$("timeLbl"), meta=$("meta");
 
   let ffmpegLoaded=false, selection=null, dragging=false, dragStart=null;
   let startMark=null, endMark=null, blackouts=[], mutes=[], inputName="input.mp4";
@@ -100,18 +115,44 @@
   overlay.addEventListener("mousedown",(e)=>{ if(!vid.videoWidth) return alert("Load a video first."); const bb=overlay.getBoundingClientRect(); const v0=canvasToVideo({x:e.clientX-bb.left,y:e.clientY-bb.top}); dragging=true; dragStart=v0; selection={x:v0.x,y:v0.y,w:1,h:1}; drawOverlay(); });
   window.addEventListener("mousemove",(e)=>{ if(!dragging) return; const bb=overlay.getBoundingClientRect(); const v1=canvasToVideo({x:e.clientX-bb.left,y:e.clientY-bb.top}); selection={x:Math.min(dragStart.x,v1.x),y:Math.min(dragStart.y,v1.y),w:Math.abs(v1.x-dragStart.x),h:Math.abs(v1.y-dragStart.y)}; drawOverlay(); });
   window.addEventListener("mouseup",()=> dragging=false);
-  byId("clearSel").onclick=()=>{ selection=null; drawOverlay(); };
-  byId("play").onclick=()=> vid.play();
-  byId("pause").onclick=()=> vid.pause();
-  byId("startNow").onclick=()=>{ startMark=vid.currentTime; alert(`Start = ${startMark.toFixed(2)}s`); };
-  byId("endNow").onclick=()=>{ endMark=vid.currentTime; alert(`End = ${endMark.toFixed(2)}s`); };
+  $("clearSel").onclick=()=>{ selection=null; drawOverlay(); };
+  $("play").onclick=()=> vid.play();
+  $("pause").onclick=()=> vid.pause();
+  $("startNow").onclick=()=>{ startMark=vid.currentTime; alert(`Start = ${startMark.toFixed(2)}s`); };
+  $("endNow").onclick=()=>{ endMark=vid.currentTime; alert(`End = ${endMark.toFixed(2)}s`); };
   function renderLists(){ blkList.innerHTML = blackouts.map((b,i)=>`<li>#${i+1} ${b.start.toFixed(1)}–${b.end.toFixed(1)}s</li>`).join(""); muteList.innerHTML = mutes.map((m,i)=>`<li>#${i+1} ${m.start.toFixed(1)}–${m.end.toFixed(1)}s</li>`).join(""); }
-  byId("addBlackout").onclick=()=>{ if(startMark==null||endMark==null||!selection) return alert("Set start/end and draw an area first."); blackouts.push({start:startMark,end:endMark,rect:selection}); renderLists(); };
-  byId("addMute").onclick=()=>{ if(startMark==null||endMark==null) return alert("Set start/end first."); mutes.push({start:startMark,end:endMark}); renderLists(); };
-  loadBtn.onclick=async()=>{ const f=fileEl.files&&fileEl.files[0]; if(!f) return alert("Choose a video file."); await ensureFFmpeg(); inputName=`input_${Date.now()}.`+(f.name.split(".").pop()||"mp4"); ffmpeg.FS("writeFile", inputName, await fetchFile(f)); vid.src=URL.createObjectURL(f); vid.load(); meta.textContent=`Loaded: ${f.name}`; };
-  function buildFilters(){ const vparts=blackouts.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`); const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`); const v=vparts.length?vparts.join(","):"null"; const a=aparts.length?aparts.join(","):"anull"; return { filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`, maps:["-map","[vout]","-map","[aout]"] }; }
-  byId("startExport").onclick=async()=>{ if(!ffmpegLoaded) await ensureFFmpeg(); if(!vid.src) return alert("Load a video first"); const { filterComplex, maps } = buildFilters(); prog.value=0; progLbl.textContent="Encoding MP4…"; await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4"); const mp4Data=ffmpeg.FS("readFile","out.mp4"); const mp4Url=URL.createObjectURL(new Blob([mp4Data.buffer],{type:"video/mp4"})); outLinks.innerHTML = `<a class="btn" href="${mp4Url}" download="redacted.mp4">Download MP4</a>`; prog.value=1; progLbl.textContent="Done!"; };
-  window.addEventListener("error",(e)=>{ if(e.target && e.target.tagName==="SCRIPT") { diag.textContent += `\nScript load failed: ${e.target.src||"(inline)"}`; }}, true);
+  $("addBlackout").onclick=()=>{ if(startMark==null||endMark==null||!selection) return alert("Set start/end and draw an area first."); blackouts.push({start:startMark,end:endMark,rect:selection}); renderLists(); };
+  $("addMute").onclick=()=>{ if(startMark==null||endMark==null) return alert("Set start/end first."); mutes.push({start:startMark,end:endMark}); renderLists(); };
+
+  loadBtn.onclick=async()=>{
+    const f=fileEl.files&&fileEl.files[0];
+    if(!f) return alert("Choose a video file.");
+    await ensureFFmpeg();
+    inputName=`input_${Date.now()}.`+(f.name.split(".").pop()||"mp4");
+    ffmpeg.FS("writeFile", inputName, await fetchFile(f));
+    vid.src=URL.createObjectURL(f); vid.load();
+    meta.textContent=`Loaded: ${f.name}`;
+  };
+
+  function buildFilters(){
+    const vparts=blackouts.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`);
+    const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`);
+    const v=vparts.length?vparts.join(","):"null";
+    const a=aparts.length?aparts.join(","):"anull";
+    return { filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`, maps:["-map","[vout]","-map","[aout]"] };
+  }
+
+  $("startExport").onclick=async()=>{
+    if(!ffmpegLoaded) await ensureFFmpeg();
+    if(!vid.src) return alert("Load a video first");
+    const { filterComplex, maps } = buildFilters();
+    prog.value=0; progLbl.textContent="Encoding MP4…";
+    await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4");
+    const mp4Data=ffmpeg.FS("readFile","out.mp4");
+    const mp4Url=URL.createObjectURL(new Blob([mp4Data.buffer],{type:"video/mp4"}));
+    outLinks.innerHTML = `<a class="btn" href="${mp4Url}" download="redacted.mp4">Download MP4</a>`;
+    prog.value=1; progLbl.textContent="Done!";
+  };
 </script>
 </body>
 </html>
