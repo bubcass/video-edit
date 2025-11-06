@@ -19,6 +19,7 @@
   li{background:#161b22;border:1px solid #202533;border-radius:8px;padding:6px 8px;margin:4px 0;font-size:13px}
   progress{width:100%;height:12px}
   small.mono{font-family:ui-monospace,Menlo,Consolas,monospace;color:#9db}
+  #diag{white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;color:#9db;margin-top:8px}
 </style>
 </head>
 <body>
@@ -83,22 +84,40 @@
     <div style="margin-top:10px">
       <progress id="prog" value="0" max="1"></progress>
       <div id="progLbl" class="mono">Idle</div>
+      <div id="diag"></div>
     </div>
     <div id="outLinks" style="margin-top:8px"></div>
   </div>
 </div>
 
-<!-- ✅ Correct ffmpeg.wasm imports with explicit corePath -->
+<!-- App -->
 <script type="module">
+  // Primary + fallback CDN URLs for the ffmpeg CORE bundle
+  const CORE_UNPKG = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js";
+  const CORE_JSD  = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js";
+
+  // ESM for the wrapper + JSZip
   import { createFFmpeg, fetchFile } from "https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js";
   import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
 
-  const ffmpeg = createFFmpeg({
-    log: true,
-    corePath: "https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js"
-  });
+  const diag = document.getElementById("diag");
+  function logd(msg){ diag.textContent += (diag.textContent ? "\n" : "") + msg; console.log(msg); }
 
-  /* --- main app logic --- */
+  // Probe core path (CORS + 200). Fallback if needed.
+  async function selectCorePath() {
+    try {
+      const r1 = await fetch(CORE_UNPKG, { mode: "cors" });
+      logd(`Probe unpkg core: ${r1.status} ${r1.statusText}`);
+      if (r1.ok) return CORE_UNPKG;
+    } catch (e) { logd(`unpkg probe error: ${e}`); }
+    try {
+      const r2 = await fetch(CORE_JSD, { mode: "cors" });
+      logd(`Probe jsDelivr core: ${r2.status} ${r2.statusText}`);
+      if (r2.ok) return CORE_JSD;
+    } catch (e) { logd(`jsDelivr probe error: ${e}`); }
+    throw new Error("Could not fetch ffmpeg-core.js from either CDN.");
+  }
+
   const fileEl = document.getElementById("file");
   const loadBtn = document.getElementById("loadBtn");
   const vid = document.getElementById("vid");
@@ -120,10 +139,19 @@
   const hlsTimeEl = document.getElementById("hlsTime");
 
   let selection=null,dragging=false,dragStart=null,startMark=null,endMark=null,blackouts=[],mutes=[],inputName="input.mp4";
-  let ffmpegLoaded=false;
+  let ffmpeg=null, ffmpegLoaded=false;
+
   async function ensureFFmpeg(){
-    if(!ffmpegLoaded){progLbl.textContent="Loading FFmpeg…";await ffmpeg.load();ffmpegLoaded=true;progLbl.textContent="FFmpeg ready";}
+    if(ffmpegLoaded) return;
+    const corePath = await selectCorePath();
+    logd("Using corePath: " + corePath);
+    ffmpeg = createFFmpeg({ log: true, corePath });
+    progLbl.textContent="Loading FFmpeg…";
+    await ffmpeg.load();
+    ffmpegLoaded=true;
+    progLbl.textContent="FFmpeg ready";
   }
+
   function fmt(s){if(!isFinite(s))return"--:--";s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`;}
   function fitCanvas(){const r=vid.getBoundingClientRect();overlay.width=r.width;overlay.height=r.height;drawOverlay();}
   function videoRect(){const vw=vid.videoWidth,vh=vid.videoHeight;const cw=overlay.width,ch=overlay.height;if(!vw||!vh)return{x:0,y:0,w:cw,h:ch,scaleX:1,scaleY:1};const scale=Math.min(cw/vw,ch/vh);const dw=Math.round(vw*scale),dh=Math.round(vh*scale);const offx=Math.floor((cw-dw)/2),offy=Math.floor((ch-dh)/2);return{x:offx,y:offy,w:dw,h:dh,scaleX:vw/dw,scaleY:vh/dh};}
@@ -133,10 +161,12 @@
   window.addEventListener("resize",fitCanvas);
   vid.addEventListener("loadedmetadata",fitCanvas);
   vid.addEventListener("timeupdate",()=>timeLbl.textContent=`${fmt(vid.currentTime)} / ${fmt(vid.duration)}`);
+
   overlay.addEventListener("mousedown",e=>{if(!vid.videoWidth){alert("Load a video first.");return;}const bb=overlay.getBoundingClientRect();const sx=e.clientX-bb.left,sy=e.clientY-bb.top;const v0=canvasToVideo({x:sx,y:sy});dragging=true;dragStart=v0;selection={x:v0.x,y:v0.y,w:1,h:1};drawOverlay();});
   window.addEventListener("mousemove",e=>{if(!dragging)return;const bb=overlay.getBoundingClientRect();const cx=Math.max(0,Math.min(e.clientX-bb.left,overlay.width));const cy=Math.max(0,Math.min(e.clientY-bb.top,overlay.height));const v1=canvasToVideo({x:cx,y:cy});selection={x:Math.min(dragStart.x,v1.x),y:Math.min(dragStart.y,v1.y),w:Math.abs(v1.x-dragStart.x),h:Math.abs(v1.y-dragStart.y)};drawOverlay();});
   window.addEventListener("mouseup",()=>dragging=false);
   document.getElementById("clearSel").onclick=()=>{selection=null;drawOverlay();};
+
   document.getElementById("play").onclick=()=>vid.play();
   document.getElementById("pause").onclick=()=>vid.pause();
   document.getElementById("startNow").onclick=()=>{startMark=vid.currentTime;alert(`Start = ${startMark.toFixed(2)}s`);};
@@ -144,19 +174,79 @@
 
   function renderLists(){blkList.innerHTML=blackouts.map((b,i)=>`<li>#${i+1} ${b.start.toFixed(2)}–${b.end.toFixed(2)}s | x=${b.rect.x} y=${b.rect.y} w=${b.rect.w} h=${b.rect.h}</li>`).join("");muteList.innerHTML=mutes.map((m,i)=>`<li>#${i+1} ${m.start.toFixed(2)}–${m.end.toFixed(2)}s</li>`).join("");}
   document.getElementById("addBlackout").onclick=()=>{if(startMark==null||endMark==null)return alert("Set Start/End first");if(!selection)return alert("Draw a box");blackouts.push({start:startMark,end:endMark,rect:selection});renderLists();};
-  document.getElementById("addMute").onclick=()=>{if(startMark==null||endMark==null)return alert("Set Start/End first");mutes.push({start:startMark,end:endMark});renderLists();};
+  document.getElementById("addMute").onclick=()=>{if(startMark==null||endMark==null)return alert("Set mute Start/End first");mutes.push({start:startMark,end:endMark});renderLists();};
 
-  function browserCanPlayFile(file){const type=(file.type||"").toLowerCase();const ext=(file.name.split(".").pop()||"").toLowerCase();if(type&&vid.canPlayType(type))return true;const ua=navigator.userAgent.toLowerCase();if((ua.includes("chrome")||ua.includes("edg"))&&(ext==="mov"||type.includes("quicktime")))return false;return true;}
-  async function makePreviewProxy(ffmpeg,inputName){await ffmpeg.run("-i",inputName,"-vf","scale='min(1280,iw)':-2","-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-b:a","128k","-movflags","+faststart","preview.mp4");const data=ffmpeg.FS("readFile","preview.mp4");return new Blob([data.buffer],{type:"video/mp4"});}
+  // Preview compatibility + proxy
+  function browserCanPlayFile(file){
+    const type=(file.type||"").toLowerCase();
+    const ext=(file.name.split(".").pop()||"").toLowerCase();
+    if(type && vid.canPlayType(type)) return true;
+    const ua=navigator.userAgent.toLowerCase();
+    const isChromeLike = ua.includes("chrome") || ua.includes("edg");
+    if(isChromeLike && (ext==="mov" || type.includes("quicktime"))) return false;
+    return true;
+  }
+  async function makePreviewProxy(inputName){
+    await ffmpeg.run("-i",inputName,"-vf","scale='min(1280,iw)':-2","-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-b:a","128k","-movflags","+faststart","preview.mp4");
+    const data=ffmpeg.FS("readFile","preview.mp4");
+    return new Blob([data.buffer],{type:"video/mp4"});
+  }
 
-  loadBtn.onclick=async()=>{const f=fileEl.files&&fileEl.files[0];if(!f)return alert("Choose a video");await ensureFFmpeg();inputName="input_"+Date.now()+"."+(f.name.split(".").pop()||"mp4");ffmpeg.FS("writeFile",inputName,await fetchFile(f));let previewBlob;if(browserCanPlayFile(f)){previewBlob=f;progLbl.textContent="Loaded (native preview)";}else{progLbl.textContent="Making preview…";previewBlob=await makePreviewProxy(ffmpeg,inputName);progLbl.textContent="Preview ready";}vid.src=URL.createObjectURL(previewBlob);vid.load();meta.textContent=`Loaded: ${f.name}`;};
+  loadBtn.onclick=async()=>{
+    const f=fileEl.files&&fileEl.files[0];
+    if(!f){ alert("Choose a video"); return; }
+    try {
+      await ensureFFmpeg();
+    } catch (e) {
+      logd("FFmpeg load error: " + e);
+      alert("Failed to load FFmpeg core. See diagnostics below.");
+      return;
+    }
+    inputName="input_"+Date.now()+"."+(f.name.split(".").pop()||"mp4");
+    ffmpeg.FS("writeFile",inputName,await fetchFile(f));
+    let previewBlob;
+    if (browserCanPlayFile(f)) {
+      previewBlob = f;
+      progLbl.textContent = "Loaded (native preview)";
+    } else {
+      progLbl.textContent = "Making preview…";
+      previewBlob = await makePreviewProxy(inputName);
+      progLbl.textContent = "Preview ready";
+    }
+    vid.src = URL.createObjectURL(previewBlob);
+    vid.load();
+    meta.textContent = `Loaded: ${f.name}`;
+  };
 
-  toggleAdv.onclick=()=>{adv.style.display=adv.style.display==="none"?"block":"none";};
+  toggleAdv.onclick=()=>{adv.style.display=adv.style.display==="none"?"block":"none";advState.textContent=adv.style.display==="none"?"(using defaults)":"";};
 
-  function buildFilters(){const vparts=blackouts.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`);const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`);const v=vparts.length?vparts.join(","):"null";const a=aparts.length?aparts.join(","):"anull";return{filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`,maps:["-map","[vout]","-map","[aout]"]};}
-  function blobFromU8(u8,type){return new Blob([u8.buffer],{type});}
+  function buildFilters(){
+    const vparts=blackouts.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`);
+    const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`);
+    const v=vparts.length?vparts.join(","):"null";
+    const a=aparts.length?aparts.join(","):"anull";
+    return { filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`, maps:["-map","[vout]","-map","[aout]"] };
+  }
+  function blobFromU8(u8,type){ return new Blob([u8.buffer],{type}); }
 
-  document.getElementById("startExport").onclick=async()=>{if(!ffmpegLoaded)await ensureFFmpeg();if(!vid.src)return alert("Load a video first");const{filterComplex,maps}=buildFilters();prog.value=0;progLbl.textContent="Encoding MP4…";await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4");const mp4Data=ffmpeg.FS("readFile","out.mp4");const mp4Blob=new Blob([mp4Data.buffer],{type:"video/mp4"});const mp4Url=URL.createObjectURL(mp4Blob);outLinks.innerHTML=`<a class='btn' href='${mp4Url}' download='redacted.mp4'>Download MP4</a>`;prog.value=1;progLbl.textContent="Done!";};
+  document.getElementById("startExport").onclick=async()=>{
+    if(!ffmpegLoaded) await ensureFFmpeg();
+    if(!vid.src) return alert("Load a video first");
+    const { filterComplex, maps } = buildFilters();
+    prog.value=0; progLbl.textContent="Encoding MP4…";
+    await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4");
+    const mp4Data=ffmpeg.FS("readFile","out.mp4");
+    const mp4Url=URL.createObjectURL(blobFromU8(mp4Data,"video/mp4"));
+    outLinks.innerHTML = `<a class='btn' href='${mp4Url}' download='redacted.mp4'>Download MP4</a>`;
+    prog.value=1; progLbl.textContent="Done!";
+  };
+
+  // Log script load errors (helps catch 404/CORS quickly)
+  window.addEventListener("error", (e) => {
+    if (e.target && e.target.tagName === "SCRIPT") {
+      logd("Script load failed: " + (e.target.src || "(inline)"));
+    }
+  }, true);
 </script>
 </body>
 </html>
