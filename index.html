@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Web Video Redactor (MP4 + HLS, client-only)</title>
+<title>Web Video Redactor (MP4 + HLS)</title>
 <style>
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f1115;color:#eaeaea;margin:0}
   .wrap{max-width:980px;margin:0 auto;padding:12px}
@@ -88,308 +88,65 @@
   </div>
 </div>
 
-<!-- ffmpeg.wasm + JSZip via CDN -->
+<!-- ✅ Safe CDN imports (no CORS issues) -->
 <script type="module">
-  import { createFFmpeg, fetchFile } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js';
-  import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
+  import { createFFmpeg, fetchFile } from "https://esm.sh/@ffmpeg/ffmpeg@0.12.6";
+  import JSZip from "https://esm.sh/jszip@3.10.1";
 
-  // --- UI refs
-  const fileEl = document.getElementById('file');
-  const loadBtn = document.getElementById('loadBtn');
-  const vid = document.getElementById('vid');
-  const overlay = document.getElementById('overlay');
-  const ctx = overlay.getContext('2d');
-  const timeLbl = document.getElementById('timeLbl');
-  const meta = document.getElementById('meta');
-  const blkList = document.getElementById('blkList');
-  const muteList = document.getElementById('muteList');
-  const prog = document.getElementById('prog');
-  const progLbl = document.getElementById('progLbl');
-  const outLinks = document.getElementById('outLinks');
-  const toggleAdv = document.getElementById('toggleAdv');
-  const adv = document.getElementById('adv');
-  const advState = document.getElementById('advState');
+  const fileEl = document.getElementById("file");
+  const loadBtn = document.getElementById("loadBtn");
+  const vid = document.getElementById("vid");
+  const overlay = document.getElementById("overlay");
+  const ctx = overlay.getContext("2d");
+  const timeLbl = document.getElementById("timeLbl");
+  const meta = document.getElementById("meta");
+  const blkList = document.getElementById("blkList");
+  const muteList = document.getElementById("muteList");
+  const prog = document.getElementById("prog");
+  const progLbl = document.getElementById("progLbl");
+  const outLinks = document.getElementById("outLinks");
+  const toggleAdv = document.getElementById("toggleAdv");
+  const adv = document.getElementById("adv");
+  const advState = document.getElementById("advState");
+  const codecEl = document.getElementById("codec");
+  const crfEl = document.getElementById("crf");
+  const presetEl = document.getElementById("preset");
+  const hlsTimeEl = document.getElementById("hlsTime");
 
-  // Advanced defaults
-  const codecEl = document.getElementById('codec');
-  const crfEl = document.getElementById('crf');
-  const presetEl = document.getElementById('preset');
-  const hlsTimeEl = document.getElementById('hlsTime');
-
-  // State
-  let selection = null; // {x,y,w,h} video px
-  let dragging = false, dragStart = null;
-  let startMark=null, endMark=null;
-  let blackouts=[], mutes=[];
-  let inputName = 'input.mp4'; // file name in ffmpeg FS
-
-  // ffmpeg.wasm
-  const ffmpeg = createFFmpeg({ log: true });
-  let ffmpegLoaded = false;
-  async function ensureFFmpeg() {
-    if (!ffmpegLoaded) {
-      progLbl.textContent = 'Loading FFmpeg…';
-      await ffmpeg.load();
-      ffmpegLoaded = true;
-      progLbl.textContent = 'FFmpeg ready';
-    }
+  let selection=null,dragging=false,dragStart=null,startMark=null,endMark=null,blackouts=[],mutes=[],inputName="input.mp4";
+  const ffmpeg=createFFmpeg({log:true});
+  let ffmpegLoaded=false;
+  async function ensureFFmpeg(){
+    if(!ffmpegLoaded){progLbl.textContent="Loading FFmpeg…";await ffmpeg.load();ffmpegLoaded=true;progLbl.textContent="FFmpeg ready";}
   }
+  function fmt(s){if(!isFinite(s))return"--:--";s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`;}
+  function fitCanvas(){const r=vid.getBoundingClientRect();overlay.width=r.width;overlay.height=r.height;overlay.style.width=r.width+"px";overlay.style.height=r.height+"px";drawOverlay();}
+  function videoRect(){const vw=vid.videoWidth,vh=vid.videoHeight;const cw=overlay.width,ch=overlay.height;if(!vw||!vh)return{x:0,y:0,w:cw,h:ch,scaleX:1,scaleY:1};const scale=Math.min(cw/vw,ch/vh);const dw=Math.round(vw*scale),dh=Math.round(vh*scale);const offx=Math.floor((cw-dw)/2),offy=Math.floor((ch-dh)/2);return{x:offx,y:offy,w:dw,h:dh,scaleX:vw/dw,scaleY:vh/dh};}
+  function canvasToVideo(pt){const r=videoRect();const cx=Math.max(r.x,Math.min(pt.x,r.x+r.w));const cy=Math.max(r.y,Math.min(pt.y,r.y+r.h));return{x:Math.round((cx-r.x)*r.scaleX),y:Math.round((cy-r.y)*r.scaleY)};}
+  function videoToCanvasRect(rect){const r=videoRect();return{x:Math.round(r.x+rect.x/r.scaleX),y:Math.round(r.y+rect.y/r.scaleY),w:Math.round(rect.w/r.scaleX),h:Math.round(rect.h/r.scaleY)};}
+  function drawOverlay(){ctx.clearRect(0,0,overlay.width,overlay.height);if(selection){const r=videoToCanvasRect(selection);ctx.strokeStyle="#00E5FF";ctx.lineWidth=2;ctx.setLineDash([6,3]);ctx.strokeRect(r.x,r.y,r.w,r.h);ctx.setLineDash([]);}}
+  window.addEventListener("resize",fitCanvas);
+  vid.addEventListener("loadedmetadata",fitCanvas);
+  vid.addEventListener("timeupdate",()=>timeLbl.textContent=`${fmt(vid.currentTime)} / ${fmt(vid.duration)}`);
+  overlay.addEventListener("mousedown",e=>{if(!vid.videoWidth){alert("Load a video first.");return;}const bb=overlay.getBoundingClientRect();const sx=e.clientX-bb.left,sy=e.clientY-bb.top;const v0=canvasToVideo({x:sx,y:sy});dragging=true;dragStart=v0;selection={x:v0.x,y:v0.y,w:1,h:1};drawOverlay();});
+  window.addEventListener("mousemove",e=>{if(!dragging)return;const bb=overlay.getBoundingClientRect();const cx=Math.max(0,Math.min(e.clientX-bb.left,overlay.width));const cy=Math.max(0,Math.min(e.clientY-bb.top,overlay.height));const v1=canvasToVideo({x:cx,y:cy});const x=Math.min(dragStart.x,v1.x),y=Math.min(dragStart.y,v1.y);const w=Math.max(1,Math.abs(v1.x-dragStart.x)),h=Math.max(1,Math.abs(v1.y-dragStart.y));selection={x,y,w,h};drawOverlay();});
+  window.addEventListener("mouseup",()=>dragging=false);
+  document.getElementById("clearSel").onclick=()=>{selection=null;drawOverlay();};
+  document.getElementById("play").onclick=()=>vid.play();
+  document.getElementById("pause").onclick=()=>vid.pause();
+  document.getElementById("startNow").onclick=()=>{startMark=vid.currentTime;alert(`Start = ${startMark.toFixed(2)}s`);};
+  document.getElementById("endNow").onclick=()=>{endMark=vid.currentTime;alert(`End = ${endMark.toFixed(2)}s`);};
+  function renderLists(){blkList.innerHTML=blackouts.map((b,i)=>`<li>#${i+1} ${b.start.toFixed(2)}–${b.end.toFixed(2)}s | x=${b.rect.x} y=${b.rect.y} w=${b.rect.w} h=${b.rect.h} <button data-i="${i}" class="rmB btn ghost" style="padding:2px 6px;margin-left:8px">remove</button></li>`).join("");muteList.innerHTML=mutes.map((m,i)=>`<li>#${i+1} ${m.start.toFixed(2)}–${m.end.toFixed(2)}s <button data-i="${i}" class="rmM btn ghost" style="padding:2px 6px;margin-left:8px">remove</button></li>`).join("");document.querySelectorAll(".rmB").forEach(b=>b.onclick=ev=>{const i=+ev.target.dataset.i;blackouts.splice(i,1);renderLists();});document.querySelectorAll(".rmM").forEach(b=>b.onclick=ev=>{const i=+ev.target.dataset.i;mutes.splice(i,1);renderLists();});}
+  document.getElementById("addBlackout").onclick=()=>{if(startMark==null||endMark==null)return alert("Set Start/End first");if(!selection)return alert("Draw a box");if(endMark<=startMark)return alert("End must be > Start");blackouts.push({start:startMark,end:endMark,rect:selection});renderLists();};
+  document.getElementById("addMute").onclick=()=>{if(startMark==null||endMark==null)return alert("Set Start/End first");if(endMark<=startMark)return alert("End must be > Start");mutes.push({start:startMark,end:endMark});renderLists();};
 
-  // Helpers
-  function fmt(s){ if(!isFinite(s)) return '--:--'; s=Math.max(0,Math.floor(s));
-    const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), ss=s%60;
-    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
-  }
-  function fitCanvas(){
-    const r = vid.getBoundingClientRect();
-    overlay.width = r.width; overlay.height = r.height;
-    overlay.style.width = r.width+'px'; overlay.style.height = r.height+'px';
-    drawOverlay();
-  }
-  function videoRect(){
-    const vw = vid.videoWidth, vh = vid.videoHeight;
-    const cw = overlay.width, ch = overlay.height;
-    if(!vw||!vh) return {x:0,y:0,w:cw,h:ch, scaleX:1, scaleY:1};
-    const scale = Math.min(cw/vw, ch/vh);
-    const dw = Math.round(vw*scale), dh = Math.round(vh*scale);
-    const offx = Math.floor((cw-dw)/2), offy = Math.floor((ch-dh)/2);
-    return {x:offx,y:offy,w:dw,h:dh, scaleX: vw/dw, scaleY: vh/dh};
-  }
-  function canvasToVideo(pt){
-    const r=videoRect();
-    const cx = Math.max(r.x, Math.min(pt.x, r.x+r.w));
-    const cy = Math.max(r.y, Math.min(pt.y, r.y+r.h));
-    return { x: Math.round((cx - r.x) * r.scaleX), y: Math.round((cy - r.y) * r.scaleY) };
-  }
-  function videoToCanvasRect(rect){
-    const r=videoRect();
-    return {
-      x: Math.round(r.x + rect.x / r.scaleX),
-      y: Math.round(r.y + rect.y / r.scaleY),
-      w: Math.round(rect.w / r.scaleX),
-      h: Math.round(rect.h / r.scaleY)
-    };
-  }
-  function drawOverlay(){
-    ctx.clearRect(0,0,overlay.width, overlay.height);
-    if(selection){
-      const r = videoToCanvasRect(selection);
-      ctx.strokeStyle='#00E5FF'; ctx.lineWidth=2; ctx.setLineDash([6,3]);
-      ctx.strokeRect(r.x, r.y, r.w, r.h);
-      ctx.setLineDash([]);
-    }
-  }
-  window.addEventListener('resize', fitCanvas);
-  vid.addEventListener('loadedmetadata', fitCanvas);
-  vid.addEventListener('timeupdate', ()=> timeLbl.textContent = `${fmt(vid.currentTime)} / ${fmt(vid.duration)}`);
-  vid.onerror = ()=> {
-    console.warn('Video preview error', vid.error);
-    alert('Browser cannot preview this clip. A proxy may be needed or try Safari (macOS).');
-  };
+  function browserCanPlayFile(file){const type=(file.type||"").toLowerCase();const ext=(file.name.split(".").pop()||"").toLowerCase();if(type&&vid.canPlayType(type))return true;const ua=navigator.userAgent.toLowerCase();const isChromeLike=ua.includes("chrome")||ua.includes("edg");if(isChromeLike&&(ext==="mov"||type.includes("quicktime")))return false;if(["mp4","mov","m4v"].includes(ext)){const h264OK=!!vid.canPlayType('video/mp4; codecs="avc1.42E01E"');const hevcOK=!!vid.canPlayType('video/mp4; codecs="hvc1"')||!!vid.canPlayType('video/mp4; codecs="hev1"');if(!h264OK&&!hevcOK)return false;}return true;}
+  async function makePreviewProxy(ffmpeg,inputName,outName="preview.mp4"){const args=["-i",inputName,"-vf","scale='min(1280,iw)':-2","-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-b:a","128k","-movflags","+faststart",outName];await ffmpeg.run(...args);const data=ffmpeg.FS("readFile",outName);return new Blob([data.buffer],{type:"video/mp4"});}
 
-  // Canvas events
-  overlay.addEventListener('mousedown', (e)=>{
-    if(!vid.videoWidth){ alert('Load a video first.'); return; }
-    const bb = overlay.getBoundingClientRect();
-    const sx = e.clientX - bb.left, sy = e.clientY - bb.top;
-    const v0 = canvasToVideo({x:sx,y:sy});
-    dragging = true; dragStart = v0;
-    selection = {x:v0.x, y:v0.y, w:1, h:1};
-    drawOverlay();
-  });
-  window.addEventListener('mousemove', (e)=>{
-    if(!dragging) return;
-    const bb = overlay.getBoundingClientRect();
-    const cx = Math.max(0, Math.min(e.clientX - bb.left, overlay.width));
-    const cy = Math.max(0, Math.min(e.clientY - bb.top, overlay.height));
-    const v1 = canvasToVideo({x:cx,y:cy});
-    const x = Math.min(dragStart.x, v1.x), y = Math.min(dragStart.y, v1.y);
-    const w = Math.max(1, Math.abs(v1.x - dragStart.x));
-    const h = Math.max(1, Math.abs(v1.y - dragStart.y));
-    selection = {x,y,w,h}; drawOverlay();
-  });
-  window.addEventListener('mouseup', ()=> dragging=false);
-  document.getElementById('clearSel').onclick = ()=>{ selection=null; drawOverlay(); };
+  loadBtn.onclick=async()=>{const f=fileEl.files&&fileEl.files[0];if(!f)return alert("Choose a video");await ensureFFmpeg();inputName="input_"+Date.now()+"."+(f.name.split(".").pop()||"mp4");ffmpeg.FS("writeFile",inputName,await fetchFile(f));let previewBlob;if(browserCanPlayFile(f)){previewBlob=f;progLbl.textContent="Loaded (native preview)";}else{progLbl.textContent="Making preview (transcoding)…";previewBlob=await makePreviewProxy(ffmpeg,inputName,"preview.mp4");progLbl.textContent="Preview ready (proxy)";}const url=URL.createObjectURL(previewBlob);vid.src=url;vid.load();meta.textContent=`Loaded: ${f.name} (${(f.size/1e6).toFixed(1)} MB)`;};
 
-  // Transport + marks
-  document.getElementById('play').onclick = ()=> vid.play();
-  document.getElementById('pause').onclick = ()=> vid.pause();
-  document.getElementById('startNow').onclick = ()=> { startMark = vid.currentTime; alert(`Start = ${startMark.toFixed(2)}s`); };
-  document.getElementById('endNow').onclick =   ()=> { endMark   = vid.currentTime; alert(`End = ${endMark.toFixed(2)}s`); };
+  let advOpen=false;toggleAdv.onclick=()=>{advOpen=!advOpen;adv.style.display=advOpen?"block":"none";advState.textContent=advOpen?"":"(using defaults)";};
+  function buildFilters(){const vparts=blackouts.map(b=>{const r=b.rect,st=b.start,en=b.end;return`drawbox=x=${r.x}:y=${r.y}:w=${r.w}:h=${r.h}:color=black@1:t=fill:enable='between(t,${st},${en})'`;});const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`);const v=vparts.length?vparts.join(","):"null";const a=aparts.length?aparts.join(","):"anull";return{filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`,maps:["-map","[vout]","-map","[aout]"]};}
+  function blobFromU8(u8,type){return new Blob([u8.buffer],{type});}
 
-  // Lists
-  function renderLists(){
-    blkList.innerHTML = blackouts.map((b,i)=>`<li>#${i+1} ${b.start.toFixed(2)}–${b.end.toFixed(2)}s | x=${b.rect.x} y=${b.rect.y} w=${b.rect.w} h=${b.rect.h} <button data-i="${i}" class="rmB btn ghost" style="padding:2px 6px;margin-left:8px">remove</button></li>`).join('');
-    muteList.innerHTML = mutes.map((m,i)=>`<li>#${i+1} ${m.start.toFixed(2)}–${m.end.toFixed(2)}s <button data-i="${i}" class="rmM btn ghost" style="padding:2px 6px;margin-left:8px">remove</button></li>`).join('');
-    document.querySelectorAll('.rmB').forEach(b=> b.onclick = ev => { const i=+ev.target.dataset.i; blackouts.splice(i,1); renderLists(); });
-    document.querySelectorAll('.rmM').forEach(b=> b.onclick = ev => { const i=+ev.target.dataset.i; mutes.splice(i,1); renderLists(); });
-  }
-  document.getElementById('addBlackout').onclick = ()=>{
-    if(startMark==null || endMark==null) return alert('Set Start/End first');
-    if(!selection) return alert('Draw a box on the video');
-    if(endMark <= startMark) return alert('End must be > Start');
-    blackouts.push({start:startMark, end:endMark, rect:selection});
-    renderLists();
-  };
-  document.getElementById('addMute').onclick = ()=>{
-    if(startMark==null || endMark==null) return alert('Set mute Start/End first');
-    if(endMark <= startMark) return alert('End must be > Start');
-    mutes.push({start:startMark, end:endMark});
-    renderLists();
-  };
-
-  // ---- NEW: preview compatibility + proxy generation ----
-  function browserCanPlayFile(file) {
-    const type = (file.type || '').toLowerCase();
-    const ext = (file.name.split('.').pop() || '').toLowerCase();
-
-    // If the browser explicitly supports the MIME, accept.
-    if (type && vid.canPlayType(type)) return true;
-
-    // Chrome/Edge usually can't play HEVC/ProRes MOV/MP4.
-    const ua = navigator.userAgent.toLowerCase();
-    const isChromeLike = ua.includes('chrome') || ua.includes('edg');
-
-    if (isChromeLike && (ext === 'mov' || type.includes('quicktime'))) return false;
-
-    // Fallback heuristic: assume unknown MP4/MOV may need proxy.
-    if (ext === 'mp4' || ext === 'mov' || ext === 'm4v') {
-      const h264OK = !!vid.canPlayType('video/mp4; codecs="avc1.42E01E"');
-      const hevcOK = !!vid.canPlayType('video/mp4; codecs="hvc1"') || !!vid.canPlayType('video/mp4; codecs="hev1"');
-      if (!h264OK && !hevcOK) return false;
-    }
-    return true;
-  }
-
-  async function makePreviewProxy(ffmpeg, inputName, outName = 'preview.mp4') {
-    // 720p h264/aac proxy for preview
-    const args = [
-      '-i', inputName,
-      '-vf', "scale='min(1280,iw)':-2",
-      '-c:v', 'libx264', '-crf', '23', '-preset', 'veryfast',
-      '-c:a', 'aac', '-b:a', '128k',
-      '-movflags', '+faststart',
-      outName
-    ];
-    await ffmpeg.run(...args);
-    const data = ffmpeg.FS('readFile', outName);
-    return new Blob([data.buffer], { type: 'video/mp4' });
-  }
-
-  // Load local file into <video> and ffmpeg FS (with proxy fallback)
-  loadBtn.onclick = async ()=>{
-    const f = fileEl.files && fileEl.files[0];
-    if(!f) return alert('Choose a video');
-    await ensureFFmpeg();
-
-    // Write original to ffmpeg FS (used for export)
-    inputName = 'input_' + Date.now() + '.' + (f.name.split('.').pop() || 'mp4');
-    ffmpeg.FS('writeFile', inputName, await fetchFile(f));
-
-    let previewBlob;
-    if (browserCanPlayFile(f)) {
-      previewBlob = f;                      // native preview
-      progLbl.textContent = 'Loaded (native preview)';
-    } else {
-      progLbl.textContent = 'Making preview (transcoding)…';
-      previewBlob = await makePreviewProxy(ffmpeg, inputName, 'preview.mp4');   // proxy preview
-      progLbl.textContent = 'Preview ready (proxy)';
-    }
-
-    const url = URL.createObjectURL(previewBlob);
-    vid.src = url;
-    vid.load();
-    meta.textContent = `Loaded: ${f.name} (${(f.size/1e6).toFixed(1)} MB)`;
-  };
-
-  // Advanced toggle
-  let advOpen = false;
-  toggleAdv.onclick = ()=> {
-    advOpen = !advOpen;
-    adv.style.display = advOpen ? 'block' : 'none';
-    advState.textContent = advOpen ? '' : '(using defaults)';
-  };
-
-  // Build FFmpeg filter graph
-  function buildFilters() {
-    const vparts = blackouts.map(b => {
-      const r=b.rect, st=b.start, en=b.end;
-      return `drawbox=x=${r.x}:y=${r.y}:w=${r.w}:h=${r.h}:color=black@1:t=fill:enable='between(t,${st},${en})'`;
-    });
-    const aparts = mutes.map(m => `volume=0:enable='between(t,${m.start},${m.end})'`);
-    const v = vparts.length ? vparts.join(',') : 'null';
-    const a = aparts.length ? aparts.join(',') : 'anull';
-    const filterComplex = `[0:v]${v}[vout];[0:a]${a}[aout]`;
-    return { filterComplex, maps: ['-map','[vout]','-map','[aout]'] };
-  }
-
-  function blobFromU8(u8, type){ return new Blob([u8.buffer], {type}); }
-
-  // Export (MP4 + HLS ZIP)
-  document.getElementById('startExport').onclick = async ()=>{
-    if(!ffmpegLoaded) await ensureFFmpeg();
-    if(!vid.src) return alert('Load a video first');
-
-    prog.value = 0; progLbl.textContent = 'Preparing…'; outLinks.innerHTML = '';
-
-    const { filterComplex, maps } = buildFilters();
-    const mp4Name = 'out.mp4';
-    const hlsM3U8 = 'master.m3u8';
-    const hlsSegPat = 'segment_%04d.ts';
-
-    // Parse progress from ffmpeg logs
-    ffmpeg.setLogger(({ type, message }) => {
-      if (type === 'fferr' || type === 'ffout') {
-        const m = message.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
-        if (m && isFinite(vid.duration)) {
-          const t = (+m[1])*3600 + (+m[2])*60 + parseFloat(m[3]);
-          const p = Math.max(0, Math.min(1, t / vid.duration));
-          prog.value = p; progLbl.textContent = `Encoding MP4… ${(p*100|0)}%`;
-        }
-      }
-    });
-
-    const codec = (codecEl.value || 'libx264');
-    const crf = (crfEl.value || '23');
-    const preset = (presetEl.value || 'veryfast');
-
-    // 1) MP4
-    let mp4Cmd = ['-i', inputName, '-filter_complex', filterComplex, ...maps,
-                  '-c:v', codec, '-crf', crf, '-preset', preset,
-                  '-c:a', 'aac', '-movflags', '+faststart', mp4Name];
-    progLbl.textContent = 'Encoding MP4…';
-    await ffmpeg.run(...mp4Cmd);
-    const mp4Data = ffmpeg.FS('readFile', mp4Name);
-    const mp4Blob = blobFromU8(mp4Data, 'video/mp4');
-    const mp4Url = URL.createObjectURL(mp4Blob);
-
-    // 2) HLS (package as ZIP)
-    prog.value = 0; progLbl.textContent = 'Packaging HLS…';
-    const hlsTime = (hlsTimeEl.value || '6');
-    const hlsCmd = ['-i', inputName, '-filter_complex', filterComplex, ...maps,
-                    '-c:v', codec, '-crf', crf, '-preset', preset,
-                    '-c:a', 'aac', '-hls_time', hlsTime, '-hls_playlist_type', 'vod',
-                    '-hls_flags', 'independent_segments',
-                    '-hls_segment_filename', hlsSegPat, hlsM3U8];
-    await ffmpeg.run(...hlsCmd);
-
-    const zip = new JSZip();
-    const m3u8 = ffmpeg.FS('readFile', hlsM3U8);
-    zip.file('master.m3u8', m3u8);
-    let segCount = 0;
-    for (let i=0;i<10000;i++){
-      const name = `segment_${String(i).padStart(4,'0')}.ts`;
-      try { const data = ffmpeg.FS('readFile', name); zip.file(name, data); segCount++; }
-      catch { if(i>0) break; }
-    }
-    const zipBlob = await zip.generateAsync({type:'blob'});
-    const zipUrl = URL.createObjectURL(zipBlob);
-
-    outLinks.innerHTML =
-      `<a class="btn" href="${mp4Url}" download="redacted.mp4">Download MP4</a>
-       <a class="btn ghost" href="${zipUrl}" download="hls_bundle.zip">Download HLS (.zip)</a>`;
-    prog.value = 1; progLbl.textContent = `Done (HLS files: ${segCount})`;
-  };
-</script>
-</body>
-</html>
+  document.getElementById("startExport").onclick=async()=>{if(!ffmpegLoaded)await ensureFFmpeg();if(!vid.src)return alert("Load a video first");prog.value=0;progLbl.textContent="Preparing…";outLinks.innerHTML="";const{filterComplex,maps}=buildFilters();const mp4Name="out.mp4",hlsM3U8="master.m3u8",hlsSegPat="segment_%04d.ts";ffmpeg.setLogger(({type,message})=>{if(type==="fferr"||type==="ffout"){const m=message.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);if(m&&isFinite(vid.duration)){const t=(+m[1])*3600+(+m[2])*60+parseFloat(m[3]);const p=Math.max(0,Math.min(1,t/vid.duration));prog.value=p;progLbl.textContent=`Encoding MP4… ${(p*100|0)}%`;}}});const codec=(codecEl.value||"libx264"),crf=(crfEl.value||"23"),preset=(presetEl.value||"veryfast");await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v",codec,"-crf",crf,"-preset",preset,"-c:a","aac","-movflags","+faststart",mp4Name);const mp4Data=ffmpeg.FS("readFile",mp4Name);const mp4Blob=blobFromU8(mp4Data,"video/mp4");const mp4Url=URL.createObjectURL(mp4Blob);prog.value=0;progLbl.textContent="Packaging HLS…";const hlsTime=(hlsTimeEl.value||"6");await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v",codec,"-crf",crf,"-preset",preset,"-c:a","aac","-hls_time",hlsTime,"-hls_playlist_type
