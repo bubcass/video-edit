@@ -27,7 +27,7 @@
 
   <div class="panel">
     <div class="row">
-      <input id="file" type="file" accept="video/mp4,video/*" />
+      <input id="file" type="file" accept="video/*" />
       <button class="btn" id="loadBtn">Load video</button>
       <span id="meta" class="mono"></span>
     </div>
@@ -88,7 +88,7 @@
   </div>
 </div>
 
-<!-- ffmpeg.wasm + JSZip via unpkg CDN -->
+<!-- ffmpeg.wasm + JSZip via CDN -->
 <script type="module">
   import { createFFmpeg, fetchFile } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js';
   import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
@@ -182,6 +182,10 @@
   window.addEventListener('resize', fitCanvas);
   vid.addEventListener('loadedmetadata', fitCanvas);
   vid.addEventListener('timeupdate', ()=> timeLbl.textContent = `${fmt(vid.currentTime)} / ${fmt(vid.duration)}`);
+  vid.onerror = ()=> {
+    console.warn('Video preview error', vid.error);
+    alert('Browser cannot preview this clip. A proxy may be needed or try Safari (macOS).');
+  };
 
   // Canvas events
   overlay.addEventListener('mousedown', (e)=>{
@@ -234,19 +238,71 @@
     renderLists();
   };
 
-  // Load local file into <video> and ffmpeg FS
+  // ---- NEW: preview compatibility + proxy generation ----
+  function browserCanPlayFile(file) {
+    const type = (file.type || '').toLowerCase();
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+
+    // If the browser explicitly supports the MIME, accept.
+    if (type && vid.canPlayType(type)) return true;
+
+    // Chrome/Edge usually can't play HEVC/ProRes MOV/MP4.
+    const ua = navigator.userAgent.toLowerCase();
+    const isChromeLike = ua.includes('chrome') || ua.includes('edg');
+
+    if (isChromeLike && (ext === 'mov' || type.includes('quicktime'))) return false;
+
+    // Fallback heuristic: assume unknown MP4/MOV may need proxy.
+    if (ext === 'mp4' || ext === 'mov' || ext === 'm4v') {
+      const h264OK = !!vid.canPlayType('video/mp4; codecs="avc1.42E01E"');
+      const hevcOK = !!vid.canPlayType('video/mp4; codecs="hvc1"') || !!vid.canPlayType('video/mp4; codecs="hev1"');
+      if (!h264OK && !hevcOK) return false;
+    }
+    return true;
+  }
+
+  async function makePreviewProxy(ffmpeg, inputName, outName = 'preview.mp4') {
+    // 720p h264/aac proxy for preview
+    const args = [
+      '-i', inputName,
+      '-vf', "scale='min(1280,iw)':-2",
+      '-c:v', 'libx264', '-crf', '23', '-preset', 'veryfast',
+      '-c:a', 'aac', '-b:a', '128k',
+      '-movflags', '+faststart',
+      outName
+    ];
+    await ffmpeg.run(...args);
+    const data = ffmpeg.FS('readFile', outName);
+    return new Blob([data.buffer], { type: 'video/mp4' });
+  }
+
+  // Load local file into <video> and ffmpeg FS (with proxy fallback)
   loadBtn.onclick = async ()=>{
     const f = fileEl.files && fileEl.files[0];
     if(!f) return alert('Choose a video');
     await ensureFFmpeg();
-    inputName = 'input_' + Date.now() + '.mp4';
+
+    // Write original to ffmpeg FS (used for export)
+    inputName = 'input_' + Date.now() + '.' + (f.name.split('.').pop() || 'mp4');
     ffmpeg.FS('writeFile', inputName, await fetchFile(f));
-    vid.src = URL.createObjectURL(f);
+
+    let previewBlob;
+    if (browserCanPlayFile(f)) {
+      previewBlob = f;                      // native preview
+      progLbl.textContent = 'Loaded (native preview)';
+    } else {
+      progLbl.textContent = 'Making preview (transcoding)…';
+      previewBlob = await makePreviewProxy(ffmpeg, inputName, 'preview.mp4');   // proxy preview
+      progLbl.textContent = 'Preview ready (proxy)';
+    }
+
+    const url = URL.createObjectURL(previewBlob);
+    vid.src = url;
     vid.load();
     meta.textContent = `Loaded: ${f.name} (${(f.size/1e6).toFixed(1)} MB)`;
   };
 
-  // Advanced
+  // Advanced toggle
   let advOpen = false;
   toggleAdv.onclick = ()=> {
     advOpen = !advOpen;
@@ -277,15 +333,13 @@
     prog.value = 0; progLbl.textContent = 'Preparing…'; outLinks.innerHTML = '';
 
     const { filterComplex, maps } = buildFilters();
-    // MP4
     const mp4Name = 'out.mp4';
     const hlsM3U8 = 'master.m3u8';
     const hlsSegPat = 'segment_%04d.ts';
 
-    // Progress tap (best-effort: parse ffmpeg logs)
+    // Parse progress from ffmpeg logs
     ffmpeg.setLogger(({ type, message }) => {
       if (type === 'fferr' || type === 'ffout') {
-        // crude estimate: look for "time=00:00:12.34"
         const m = message.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
         if (m && isFinite(vid.duration)) {
           const t = (+m[1])*3600 + (+m[2])*60 + parseFloat(m[3]);
@@ -309,10 +363,9 @@
     const mp4Blob = blobFromU8(mp4Data, 'video/mp4');
     const mp4Url = URL.createObjectURL(mp4Blob);
 
-    // 2) HLS (package as ZIP so you get playlist + all segments)
+    // 2) HLS (package as ZIP)
     prog.value = 0; progLbl.textContent = 'Packaging HLS…';
     const hlsTime = (hlsTimeEl.value || '6');
-    // reuse same filters in a fresh run (to avoid FS name clashes we can keep outputs unique)
     const hlsCmd = ['-i', inputName, '-filter_complex', filterComplex, ...maps,
                     '-c:v', codec, '-crf', crf, '-preset', preset,
                     '-c:a', 'aac', '-hls_time', hlsTime, '-hls_playlist_type', 'vod',
@@ -320,11 +373,9 @@
                     '-hls_segment_filename', hlsSegPat, hlsM3U8];
     await ffmpeg.run(...hlsCmd);
 
-    // Collect HLS files from in-memory FS
     const zip = new JSZip();
     const m3u8 = ffmpeg.FS('readFile', hlsM3U8);
     zip.file('master.m3u8', m3u8);
-    // find segments by scanning FS (limited API so we assume up to 9999)
     let segCount = 0;
     for (let i=0;i<10000;i++){
       const name = `segment_${String(i).padStart(4,'0')}.ts`;
@@ -334,7 +385,6 @@
     const zipBlob = await zip.generateAsync({type:'blob'});
     const zipUrl = URL.createObjectURL(zipBlob);
 
-    // Links
     outLinks.innerHTML =
       `<a class="btn" href="${mp4Url}" download="redacted.mp4">Download MP4</a>
        <a class="btn ghost" href="${zipUrl}" download="hls_bundle.zip">Download HLS (.zip)</a>`;
