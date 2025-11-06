@@ -3,11 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Web Video Redactor (local ffmpeg)</title>
+<title>Web Video Redactor (local ffmpeg via Actions)</title>
 <style>
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f1115;color:#eaeaea;margin:0}
   .wrap{max-width:960px;margin:0 auto;padding:12px}
-  h1{font-size:18px;margin:6px 0 10px;color:#cde}
   .panel{background:#131721;border:1px solid #202533;border-radius:12px;padding:12px;margin:10px 0}
   .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   .btn{background:#2d6cdf;color:#fff;border:0;border-radius:8px;padding:8px 12px;font-weight:600;cursor:pointer}
@@ -18,7 +17,6 @@
   ul{list-style:none;margin:0;padding:0}
   li{background:#161b22;border:1px solid #202533;border-radius:8px;padding:6px 8px;margin:4px 0;font-size:13px}
   progress{width:100%;height:12px}
-  small.mono{font-family:ui-monospace,Menlo,Consolas,monospace;color:#9db}
   #diag{white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;color:#9db;margin-top:8px}
 </style>
 </head>
@@ -30,7 +28,7 @@
     <div class="row">
       <input id="file" type="file" accept="video/*" />
       <button class="btn" id="loadBtn">Load video</button>
-      <span id="meta" class="mono"></span>
+      <span id="meta"></span>
     </div>
   </div>
 
@@ -44,7 +42,7 @@
       <button class="btn ghost" id="pause">Pause</button>
       <button class="btn ghost" id="startNow">Start = now</button>
       <button class="btn ghost" id="endNow">End = now</button>
-      <span id="timeLbl" class="mono"></span>
+      <span id="timeLbl"></span>
     </div>
     <div class="row" style="margin-top:8px">
       <button class="btn" id="addBlackout">Add blackout</button>
@@ -64,119 +62,56 @@
     </div>
     <div style="margin-top:10px">
       <progress id="prog" value="0" max="1"></progress>
-      <div id="progLbl" class="mono">Idle</div>
+      <div id="progLbl">Idle</div>
       <div id="diag"></div>
     </div>
     <div id="outLinks" style="margin-top:8px"></div>
   </div>
 </div>
 
-<!-- 1) Load local UMD wrapper (no CORS). It exposes window.FFmpeg -->
+<!-- Local wrapper, populated by GitHub Actions into the published site -->
 <script src="./ffmpeg.min.js"></script>
 
-<!-- 2) Your app code (module is fine; we read from window.FFmpeg) -->
 <script type="module">
-  const diag = document.getElementById("diag");
-  const logd = (m)=>{ diag.textContent += (diag.textContent? "\n":"") + m; console.log(m); };
-
-  if (!window.FFmpeg) {
-    logd("ffmpeg.min.js not found. Make sure ffmpeg.min.js is next to index.html.");
-  }
   const { createFFmpeg, fetchFile } = window.FFmpeg;
+  const CORE_URL = new URL('./ffmpeg-core.js', location.href).toString();
+  const ffmpeg = createFFmpeg({ log: true, corePath: CORE_URL });
 
-  // Point to local core files
-  const ffmpeg = createFFmpeg({
-    log: true,
-    corePath: "./ffmpeg-core.js"
-  });
+  const byId = (id)=>document.getElementById(id);
+  const fileEl=byId("file"), loadBtn=byId("loadBtn"), vid=byId("vid");
+  const overlay=byId("overlay"); const ctx=overlay.getContext("2d");
+  const prog=byId("prog"), progLbl=byId("progLbl"), outLinks=byId("outLinks");
+  const blkList=byId("blkList"), muteList=byId("muteList");
+  const timeLbl=byId("timeLbl"), meta=byId("meta"), diag=byId("diag");
 
-  const fileEl=document.getElementById("file");
-  const loadBtn=document.getElementById("loadBtn");
-  const vid=document.getElementById("vid");
-  const overlay=document.getElementById("overlay");
-  const ctx=overlay.getContext("2d");
-  const prog=document.getElementById("prog");
-  const progLbl=document.getElementById("progLbl");
-  const outLinks=document.getElementById("outLinks");
-  const blkList=document.getElementById("blkList");
-  const muteList=document.getElementById("muteList");
-  const timeLbl=document.getElementById("timeLbl");
-  const meta=document.getElementById("meta");
+  let ffmpegLoaded=false, selection=null, dragging=false, dragStart=null;
+  let startMark=null, endMark=null, blackouts=[], mutes=[], inputName="input.mp4";
 
-  let ffmpegLoaded=false;
-  let selection=null,dragging=false,dragStart=null,startMark=null,endMark=null,blackouts=[],mutes=[],inputName="input.mp4";
-
-  async function ensureFFmpeg(){
-    if(!ffmpegLoaded){
-      progLbl.textContent="Loading FFmpeg core…";
-      await ffmpeg.load();  // loads ./ffmpeg-core.js (+ .wasm + .worker.js)
-      ffmpegLoaded=true;
-      progLbl.textContent="Ready";
-    }
-  }
-
-  function fmt(s){if(!isFinite(s))return"--:--";s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`;}
-  function fitCanvas(){const r=vid.getBoundingClientRect();overlay.width=r.width;overlay.height=r.height;drawOverlay();}
-  function videoRect(){const vw=vid.videoWidth,vh=vid.videoHeight;const cw=overlay.width,ch=overlay.height;if(!vw||!vh)return{x:0,y:0,w:cw,h:ch,scaleX:1,scaleY:1};const scale=Math.min(cw/vw,ch/vh);const dw=Math.round(vw*scale),dh=Math.round(vh*scale);const offx=Math.floor((cw-dw)/2),offy=Math.floor((ch-dh)/2);return{x:offx,y:offy,w:dw,h:dh,scaleX:vw/dw,scaleY:vh/dh};}
-  function canvasToVideo(pt){const r=videoRect();const cx=Math.max(r.x,Math.min(pt.x,r.x+r.w));const cy=Math.max(r.y,Math.min(pt.y,r.y+r.h));return{x:Math.round((cx-r.x)*r.scaleX),y:Math.round((cy-r.y)*r.scaleY)};}
-  function videoToCanvasRect(rect){const r=videoRect();return{x:Math.round(r.x+rect.x/r.scaleX),y:Math.round(r.y+rect.y/r.scaleY),w:Math.round(rect.w/r.scaleX),h:Math.round(rect.h/r.scaleY)};}
-  function drawOverlay(){ctx.clearRect(0,0,overlay.width,overlay.height);if(selection){const r=videoToCanvasRect(selection);ctx.strokeStyle="#00E5FF";ctx.lineWidth=2;ctx.setLineDash([6,3]);ctx.strokeRect(r.x,r.y,r.w,r.h);ctx.setLineDash([]);}}
+  async function ensureFFmpeg(){ if(!ffmpegLoaded){ progLbl.textContent="Loading FFmpeg…"; await ffmpeg.load(); ffmpegLoaded=true; progLbl.textContent="Ready"; } }
+  function fmt(s){ if(!isFinite(s)) return "--:--"; s|=0; const h=(s/3600)|0,m=((s%3600)/60)|0,ss=(s%60); return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`; }
+  function fitCanvas(){ const r=vid.getBoundingClientRect(); overlay.width=r.width; overlay.height=r.height; drawOverlay(); }
+  function videoRect(){ const vw=vid.videoWidth,vh=vid.videoHeight,cw=overlay.width,ch=overlay.height; if(!vw||!vh) return {x:0,y:0,w:cw,h:ch,scaleX:1,scaleY:1}; const s=Math.min(cw/vw,ch/vh); const dw=Math.round(vw*s),dh=Math.round(vh*s); const ox=((cw-dw)/2)|0, oy=((ch-dh)/2)|0; return {x:ox,y:oy,w:dw,h:dh,scaleX:vw/dw,scaleY:vh/dh}; }
+  function canvasToVideo(pt){ const r=videoRect(); const cx=Math.max(r.x,Math.min(pt.x,r.x+r.w)), cy=Math.max(r.y,Math.min(pt.y,r.y+r.h)); return { x: Math.round((cx-r.x)*r.scaleX), y: Math.round((cy-r.y)*r.scaleY) }; }
+  function videoToCanvasRect(rect){ const r=videoRect(); return { x:Math.round(r.x+rect.x/r.scaleX), y:Math.round(r.y+rect.y/r.scaleY), w:Math.round(rect.w/r.scaleX), h:Math.round(rect.h/r.scaleY) }; }
+  function drawOverlay(){ ctx.clearRect(0,0,overlay.width,overlay.height); if(selection){ const r=videoToCanvasRect(selection); ctx.strokeStyle="#00E5FF"; ctx.setLineDash([6,3]); ctx.lineWidth=2; ctx.strokeRect(r.x,r.y,r.w,r.h); ctx.setLineDash([]); } }
   window.addEventListener("resize",fitCanvas);
   vid.addEventListener("loadedmetadata",fitCanvas);
-  vid.addEventListener("timeupdate",()=>timeLbl.textContent=`${fmt(vid.currentTime)} / ${fmt(vid.duration)}`);
-
-  overlay.addEventListener("mousedown",e=>{if(!vid.videoWidth){alert("Load a video first.");return;}const bb=overlay.getBoundingClientRect();const sx=e.clientX-bb.left,sy=e.clientY-bb.top;const v0=canvasToVideo({x:sx,y:sy});dragging=true;dragStart=v0;selection={x:v0.x,y:v0.y,w:1,h:1};drawOverlay();});
-  window.addEventListener("mousemove",e=>{if(!dragging)return;const bb=overlay.getBoundingClientRect();const cx=Math.max(0,Math.min(e.clientX-bb.left,overlay.width));const cy=Math.max(0,Math.min(e.clientY-bb.top,overlay.height));const v1=canvasToVideo({x:cx,y:cy});selection={x:Math.min(dragStart.x,v1.x),y:Math.min(dragStart.y,v1.y),w:Math.abs(v1.x-dragStart.x),h:Math.abs(v1.y-dragStart.y)};drawOverlay();});
-  window.addEventListener("mouseup",()=>dragging=false);
-  document.getElementById("clearSel").onclick=()=>{selection=null;drawOverlay();};
-  document.getElementById("play").onclick=()=>vid.play();
-  document.getElementById("pause").onclick=()=>vid.pause();
-  document.getElementById("startNow").onclick=()=>{startMark=vid.currentTime;alert(`Start = ${startMark.toFixed(2)}s`);};
-  document.getElementById("endNow").onclick=()=>{endMark=vid.currentTime;alert(`End = ${endMark.toFixed(2)}s`);};
-
-  function renderLists(){
-    blkList.innerHTML=blackouts.map((b,i)=>`<li>#${i+1} ${b.start.toFixed(1)}–${b.end.toFixed(1)}s | x=${b.rect.x} y=${b.rect.y} w=${b.rect.w} h=${b.rect.h}</li>`).join("");
-    muteList.innerHTML=mutes.map((m,i)=>`<li>#${i+1} ${m.start.toFixed(1)}–${m.end.toFixed(1)}s</li>`).join("");
-  }
-  document.getElementById("addBlackout").onclick=()=>{if(startMark==null||endMark==null||!selection)return alert("Set start/end and draw a box");blackouts.push({start:startMark,end:endMark,rect:selection});renderLists();};
-  document.getElementById("addMute").onclick=()=>{if(startMark==null||endMark==null)return alert("Set start/end");mutes.push({start:startMark,end:endMark});renderLists();};
-
-  loadBtn.onclick=async()=>{
-    const f=fileEl.files&&fileEl.files[0];
-    if(!f)return alert("Choose a video");
-    await ensureFFmpeg();
-    inputName="input_"+Date.now()+"."+(f.name.split(".").pop()||"mp4");
-    ffmpeg.FS("writeFile",inputName,await fetchFile(f));
-    vid.src=URL.createObjectURL(f); vid.load();
-    meta.textContent=`Loaded: ${f.name}`;
-  };
-
-  function buildFilters(){
-    const vparts=blackouts.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`);
-    const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`);
-    const v = vparts.length ? vparts.join(",") : "null";
-    const a = aparts.length ? aparts.join(",") : "anull";
-    return { filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`, maps:["-map","[vout]","-map","[aout]"] };
-  }
-
-  document.getElementById("startExport").onclick=async()=>{
-    if(!ffmpegLoaded)await ensureFFmpeg();
-    if(!vid.src)return alert("Load a video first");
-    const {filterComplex,maps}=buildFilters();
-    prog.value=0;progLbl.textContent="Encoding MP4…";
-    await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4");
-    const mp4Data=ffmpeg.FS("readFile","out.mp4");
-    const mp4Blob=new Blob([mp4Data.buffer],{type:"video/mp4"});
-    outLinks.innerHTML=`<a class='btn' href='${URL.createObjectURL(mp4Blob)}' download='redacted.mp4'>Download MP4</a>`;
-    prog.value=1;progLbl.textContent="Done!";
-  };
-
-  // Show any script loading issues
-  window.addEventListener("error",(e)=>{
-    if(e.target && e.target.tagName==="SCRIPT"){
-      logd("Script load failed: "+(e.target.src||"(inline)"));
-    }
-  }, true);
+  vid.addEventListener("timeupdate",()=> timeLbl.textContent = `${fmt(vid.currentTime)} / ${fmt(vid.duration)}`);
+  overlay.addEventListener("mousedown",(e)=>{ if(!vid.videoWidth) return alert("Load a video first."); const bb=overlay.getBoundingClientRect(); const v0=canvasToVideo({x:e.clientX-bb.left,y:e.clientY-bb.top}); dragging=true; dragStart=v0; selection={x:v0.x,y:v0.y,w:1,h:1}; drawOverlay(); });
+  window.addEventListener("mousemove",(e)=>{ if(!dragging) return; const bb=overlay.getBoundingClientRect(); const v1=canvasToVideo({x:e.clientX-bb.left,y:e.clientY-bb.top}); selection={x:Math.min(dragStart.x,v1.x),y:Math.min(dragStart.y,v1.y),w:Math.abs(v1.x-dragStart.x),h:Math.abs(v1.y-dragStart.y)}; drawOverlay(); });
+  window.addEventListener("mouseup",()=> dragging=false);
+  byId("clearSel").onclick=()=>{ selection=null; drawOverlay(); };
+  byId("play").onclick=()=> vid.play();
+  byId("pause").onclick=()=> vid.pause();
+  byId("startNow").onclick=()=>{ startMark=vid.currentTime; alert(`Start = ${startMark.toFixed(2)}s`); };
+  byId("endNow").onclick=()=>{ endMark=vid.currentTime; alert(`End = ${endMark.toFixed(2)}s`); };
+  function renderLists(){ blkList.innerHTML = blackouts.map((b,i)=>`<li>#${i+1} ${b.start.toFixed(1)}–${b.end.toFixed(1)}s</li>`).join(""); muteList.innerHTML = mutes.map((m,i)=>`<li>#${i+1} ${m.start.toFixed(1)}–${m.end.toFixed(1)}s</li>`).join(""); }
+  byId("addBlackout").onclick=()=>{ if(startMark==null||endMark==null||!selection) return alert("Set start/end and draw an area first."); blackouts.push({start:startMark,end:endMark,rect:selection}); renderLists(); };
+  byId("addMute").onclick=()=>{ if(startMark==null||endMark==null) return alert("Set start/end first."); mutes.push({start:startMark,end:endMark}); renderLists(); };
+  loadBtn.onclick=async()=>{ const f=fileEl.files&&fileEl.files[0]; if(!f) return alert("Choose a video file."); await ensureFFmpeg(); inputName=`input_${Date.now()}.`+(f.name.split(".").pop()||"mp4"); ffmpeg.FS("writeFile", inputName, await fetchFile(f)); vid.src=URL.createObjectURL(f); vid.load(); meta.textContent=`Loaded: ${f.name}`; };
+  function buildFilters(){ const vparts=blackouts.map(b=>`drawbox=x=${b.rect.x}:y=${b.rect.y}:w=${b.rect.w}:h=${b.rect.h}:color=black@1:t=fill:enable='between(t,${b.start},${b.end})'`); const aparts=mutes.map(m=>`volume=0:enable='between(t,${m.start},${m.end})'`); const v=vparts.length?vparts.join(","):"null"; const a=aparts.length?aparts.join(","):"anull"; return { filterComplex:`[0:v]${v}[vout];[0:a]${a}[aout]`, maps:["-map","[vout]","-map","[aout]"] }; }
+  byId("startExport").onclick=async()=>{ if(!ffmpegLoaded) await ensureFFmpeg(); if(!vid.src) return alert("Load a video first"); const { filterComplex, maps } = buildFilters(); prog.value=0; progLbl.textContent="Encoding MP4…"; await ffmpeg.run("-i",inputName,"-filter_complex",filterComplex,...maps,"-c:v","libx264","-crf","23","-preset","veryfast","-c:a","aac","-movflags","+faststart","out.mp4"); const mp4Data=ffmpeg.FS("readFile","out.mp4"); const mp4Url=URL.createObjectURL(new Blob([mp4Data.buffer],{type:"video/mp4"})); outLinks.innerHTML = `<a class="btn" href="${mp4Url}" download="redacted.mp4">Download MP4</a>`; prog.value=1; progLbl.textContent="Done!"; };
+  window.addEventListener("error",(e)=>{ if(e.target && e.target.tagName==="SCRIPT") { diag.textContent += `\nScript load failed: ${e.target.src||"(inline)"}`; }}, true);
 </script>
 </body>
 </html>
